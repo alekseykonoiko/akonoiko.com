@@ -1,0 +1,16 @@
+# Caddyfile for akonoiko.com
+akonoiko.com {
+    reverse_proxy localhost:5001
+
+    # Caddy will automatically:
+    # - Obtain SSL certificates from Let's Encrypt
+    # - Handle HTTPS redirects (HTTP -> HTTPS)
+    # - Provide secure headers
+    # - Handle certificate renewal
+}
+
+# Optional: Uncomment below if you add www.akonoiko.com DNS record
+# www.akonoiko.com {
+#     redir https://akonoiko.com{uri} permanent
+# }
+
