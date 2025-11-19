@@ -1,12 +1,23 @@
 # Caddyfile for akonoiko.com
 akonoiko.com {
-    reverse_proxy localhost:5001
+    # WebSocket support for FastHTML live reload
+    # This ensures WS connections are properly upgraded to WSS over HTTPS
+    reverse_proxy localhost:5001 {
+        # Enable WebSocket support
+        header_up Upgrade {>Upgrade}
+        header_up Connection {>Connection}
+
+        # Forward scheme/protocol info so FastHTML knows it's HTTPS
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+    }
 
     # Caddy will automatically:
     # - Obtain SSL certificates from Let's Encrypt
     # - Handle HTTPS redirects (HTTP -> HTTPS)
     # - Provide secure headers
     # - Handle certificate renewal
+    # - Upgrade WebSocket connections to WSS
 }
 
 # Optional: Uncomment below if you add www.akonoiko.com DNS record

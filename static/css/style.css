@@ -1,0 +1,18 @@
+/* Base styles for dark theme */
+html, body {
+    width: 100%;
+    height: 100%;
+    background-color: #191919;
+    color: #e3e3e3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Simple utility classes for text colors (cleaner than text-text-primary from Tailwind config) */
+.text-primary { color: #e3e3e3; }
+.text-secondary { color: #9b9b9b; }
+.text-muted { color: #6b6b6b; }
+
+/* Border color utility */
+.border-dark-border { border-color: #3a3a3a; }

@@ -1,6 +1,14 @@
 from fasthtml.common import *
 from hmac import compare_digest
 import os
+from pathlib import Path
+import sys
+
+# Add projects directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Import Instagram aggregator routes
+from projects.instagram_aggregator import setup_routes as setup_instagram
 
 # Simple in-memory user store (replace with database in production)
 users = {
@@ -23,53 +31,27 @@ beforeware = Beforeware(
         r'.*\.css',
         r'.*\.js',
         '/login',
-        '/send_login'
+        '/send_login',
+        '/progress_stream'  # SSE endpoint needs session but not auth redirect
     ]
 )
 
-# Global CSS for Notion/Apple-like dark theme without blue hue
-# Using warm neutral colors instead of cool grays
-global_css = Style("""
-    * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-    }
-
-    html, body {
-        width: 100%;
-        height: 100%;
-        background-color: #191919;
-        color: #e3e3e3;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-    }
-
-    /* Remove blue hue - use warm neutrals */
-    .bg-dark { background-color: #191919; }
-    .bg-dark-elevated { background-color: #232323; }
-    .bg-dark-hover { background-color: #2a2a2a; }
-    .border-dark { border-color: #3a3a3a; }
-    .text-primary { color: #e3e3e3; }
-    .text-secondary { color: #9b9b9b; }
-    .text-muted { color: #6b6b6b; }
-
-    /* Remove default link underlines */
-    a { text-decoration: none; }
-
-    /* Smooth transitions */
-    * { transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
-""")
+# Link to external CSS file for cleaner code organization
+global_css = Link(rel='stylesheet', href='/static/css/style.css', type='text/css')
 
 # Tailwind CSS v4.1.2 Play CDN - allows inline utility classes without build step
 # Latest stable version as of 2025
+# Good for development and simple production. For large-scale production, consider Tailwind CLI build.
 tailwind_script = Script(
     src="https://cdn.tailwindcss.com",
     type="text/javascript"
 )
 
-# Tailwind config to use neutral colors without blue hue
+# HTMX SSE extension for progress updates
+sse_script = Script(src="https://unpkg.com/htmx-ext-sse@2.2.3/sse.js")
+
+# Minimal Tailwind config - just for background color utilities
+# (Text colors are in style.css instead for cleaner code)
 tailwind_config = Script("""
     tailwind.config = {
         theme: {
@@ -79,12 +61,6 @@ tailwind_config = Script("""
                         DEFAULT: '#191919',
                         'elevated': '#232323',
                         'hover': '#2a2a2a',
-                        'border': '#3a3a3a',
-                    },
-                    'text': {
-                        'primary': '#e3e3e3',
-                        'secondary': '#9b9b9b',
-                        'muted': '#6b6b6b',
                     }
                 }
             }
@@ -94,14 +70,16 @@ tailwind_config = Script("""
 
 # Create FastHTML app with Beforeware, secret key, and Tailwind CSS
 # pico=False disables Pico CSS so we can use Tailwind instead
-# live=True enables FastHTML's live reload (auto-refresh browser on code changes)
+# live reload: Only enable for development (causes WebSocket errors over HTTPS)
+# For development: access via http://localhost:5001 to use live reload
 secret_key = os.getenv('SECRET_KEY', 'change-me-in-production-use-env-variable')
+enable_live_reload = os.getenv('ENABLE_LIVE_RELOAD', 'false').lower() == 'true'
 app, rt = fast_app(
     before=beforeware,
     secret_key=secret_key,
     pico=False,  # Disable Pico CSS
-    live=True,   # Enable live reload (development only)
-    hdrs=(global_css, tailwind_script, tailwind_config)  # Add global CSS and Tailwind
+    live=enable_live_reload,  # Enable live reload only if ENABLE_LIVE_RELOAD=true in .env
+    hdrs=(global_css, tailwind_script, tailwind_config, sse_script)  # Add global CSS, Tailwind, and SSE
 )
 
 # Mount static files directory for serving icons, CSS, JS, etc.
@@ -120,14 +98,14 @@ def login():
 
         # Form
         Form(action=send_login, method='post', cls="space-y-4")(
-            # Email field
+            # Username field
             Div()(
-                Label("Email", fr="username", cls="block text-sm font-medium mb-2 text-primary"),
+                Label("Username", fr="username", cls="block text-sm font-medium mb-2 text-primary"),
                 Input(
                     id='username',
                     name='username',
-                    type='email',
-                    placeholder='Enter your email',
+                    type='text',
+                    placeholder='Enter your username',
                     required=True,
                     cls="w-full px-4 py-3 rounded-lg transition-all duration-200 outline-none focus:bg-[#3a3a3a] hover:bg-[#3a3a3a] focus:ring-2 focus:ring-white/20",
                     style="background-color: #2a2a2a; border: 1px solid #3a3a3a; color: #e3e3e3;"
@@ -196,15 +174,15 @@ def login():
 
 # Login handler
 @rt
-def send_login(username: str, pwd: str, sess):
-    if not username or not pwd:
+def send_login(username: str, password: str, sess):
+    if not username or not password:
         return RedirectResponse('/login', status_code=303)
-    
+
     # Check credentials (in production, use proper password hashing)
-    if username in users and compare_digest(users[username].encode("utf-8"), pwd.encode("utf-8")):
+    if username in users and compare_digest(users[username].encode("utf-8"), password.encode("utf-8")):
         sess['auth'] = username
         return RedirectResponse('/', status_code=303)
-    
+
     return RedirectResponse('/login', status_code=303)
 
 # Logout handler
@@ -214,11 +192,15 @@ def logout(sess):
         del sess['auth']
     return RedirectResponse('/login', status_code=303)
 
+# Setup Instagram aggregator routes
+instagram_routes = setup_instagram(rt)
+
 # Home page with project links
 @rt
 def index(auth):
     title = f"Welcome, {auth}!"
     projects = [
+        ('Instagram Aggregator', instagram_routes['instagram_aggregator']),
         ('Project 1', project1),
         ('Project 2', project2),
     ]
@@ -291,4 +273,5 @@ def project2(auth):
 # Run the app with FastHTML's recommended approach
 # live=True in fast_app() enables auto browser refresh + serve() reload=True (default) handles server restart
 # Note: In Docker, file watchers may be unreliable. Use ./reload.sh if changes aren't detected
-serve()
+# Watch projects directory for live reload
+serve(reload_includes=['projects/**/*.py'])

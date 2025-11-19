@@ -40,3 +40,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Temporary files for Instagram aggregator
+temp/

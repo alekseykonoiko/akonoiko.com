@@ -1,0 +1,18 @@
+[Unit]
+Description=akonoiko.com FastHTML Application
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/akonoiko.com
+Environment="PATH=/root/akonoiko.com/venv/bin"
+EnvironmentFile=/root/akonoiko.com/.env
+ExecStart=/root/akonoiko.com/venv/bin/python /root/akonoiko.com/main.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

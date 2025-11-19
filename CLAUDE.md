@@ -22,6 +22,7 @@ Personal website at akonoiko.com built with FastHTML, featuring:
 ├── main.py                 # Main FastHTML application
 ├── requirements.txt        # Python dependencies
 ├── venv/                  # Python virtual environment
+├── akonoiko.service       # Systemd service configuration
 ├── Caddyfile             # Reverse proxy config
 ├── .env                  # Environment variables (SECRET_KEY)
 ├── static/               # Static assets
@@ -69,13 +70,24 @@ Main application file containing:
 - Static file mounting for icons and assets
 
 ### .env
-Contains `SECRET_KEY` for session encryption (generated during setup)
+Environment variables:
+- `SECRET_KEY` - Required for session encryption (generated during setup)
+- `ENABLE_LIVE_RELOAD` - Optional, set to `true` to enable browser auto-refresh (default: `false`)
 
 ### Caddyfile
 Caddy reverse proxy configuration:
+- Source file: `/root/akonoiko.com/Caddyfile`
+- System file: `/etc/caddy/Caddyfile` (this is what Caddy reads)
 - Proxies `akonoiko.com` to `localhost:5001`
+- WebSocket support for live reload (WSS over HTTPS)
 - Automatic SSL certificate management via Let's Encrypt
 - Automatic HTTP to HTTPS redirects
+
+**After updating Caddyfile:**
+```bash
+sudo cp /root/akonoiko.com/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
 
 ## Development Workflow
 
@@ -90,23 +102,60 @@ venv/bin/python main.py
 ```
 
 ### Hot Reload
-FastHTML's built-in hot reload is enabled with:
-- `live=True` in `fast_app()` - enables browser auto-refresh
-- `serve()` with default `reload=True` - handles server restart on file changes
+FastHTML's hot reload is controlled by environment variable:
+- **Browser auto-refresh**: Controlled by `ENABLE_LIVE_RELOAD` in `.env`
+- **Server restart**: Always enabled via `serve()` with `reload=True`
 
-When you save changes to `main.py`, WatchFiles automatically detects changes and reloads the server. The browser will refresh automatically.
-
-### Background Process
-To run the app in background:
+**To enable live reload during development:**
 ```bash
-# Start in background
-nohup venv/bin/python main.py > app.log 2>&1 &
+# Add to .env file
+ENABLE_LIVE_RELOAD=true
 
-# Check if running
-ps aux | grep main.py
+# Then restart the service
+sudo systemctl restart akonoiko
+```
 
-# Kill if needed
-pkill -f main.py
+**Important:** Live reload over HTTPS causes WebSocket errors (mixed content).
+- For HTTPS (https://akonoiko.com): Keep live reload **disabled** (default)
+- For local development: Enable it and access via `http://localhost:5001`
+
+When enabled, browser auto-refreshes when you save changes. Server always auto-restarts on file changes.
+
+### Production Deployment with Systemd
+The app runs as a systemd service for automatic startup and crash recovery:
+
+```bash
+# Start the service
+sudo systemctl start akonoiko
+
+# Stop the service
+sudo systemctl stop akonoiko
+
+# Restart after code changes
+sudo systemctl restart akonoiko
+
+# View live logs
+sudo journalctl -u akonoiko -f
+
+# Check service status
+sudo systemctl status akonoiko
+
+# Enable auto-start on boot (already enabled)
+sudo systemctl enable akonoiko
+```
+
+**Service configuration:**
+- Service file: `/etc/systemd/system/akonoiko.service`
+- Source file: `/root/akonoiko.com/akonoiko.service`
+- Runs as: `root` user
+- Auto-restart: Enabled (3 second delay)
+- Logs: Available via `journalctl`
+
+**After updating the service file:**
+```bash
+sudo cp akonoiko.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart akonoiko
 ```
 
 ### CSS Updates
@@ -177,11 +226,14 @@ pip freeze > requirements.txt
 - HTMX: https://htmx.org/docs/
 
 ## Production Setup
-- Python app runs on port 5001
-- Caddy handles HTTPS and proxies to localhost:5001
-- Use a process manager like systemd or supervisor for production
-- Set `SECRET_KEY` environment variable from `.env` file
-- Consider disabling `live=True` in production
+- **Python app**: Runs on port 5001 via systemd service
+- **Process manager**: systemd (`akonoiko.service`)
+- **Reverse proxy**: Caddy handles HTTPS and proxies to localhost:5001
+- **Environment**: `SECRET_KEY` loaded from `.env` file
+- **Auto-start**: Enabled on boot via systemd
+- **Auto-restart**: Service restarts automatically on crashes
+- **Live reload**: Enabled in development (can be disabled for production if needed)
+- **Logs**: Accessible via `sudo journalctl -u akonoiko -f`
 
 ## Notes
 - The `projects/` folder is for project-specific modules (currently ignored in main app)
