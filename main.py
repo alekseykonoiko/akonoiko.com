@@ -198,76 +198,89 @@ instagram_routes = setup_instagram(rt)
 # Home page with project links
 @rt
 def index(auth):
-    title = f"Welcome, {auth}!"
+    # Project definitions with descriptions and icons
     projects = [
-        ('Instagram Aggregator', instagram_routes['instagram_aggregator']),
-        ('Project 1', project1),
-        ('Project 2', project2),
+        {
+            'name': 'Instagram Aggregator',
+            'description': 'Aggregate and analyze Instagram follower data for marketing insights',
+            'route': instagram_routes['instagram_aggregator'],
+            'icon': '📊',
+            'status': 'active'
+        },
     ]
 
-    project_links = [
+    # Header with user info and logout
+    header = Div(
+        Div(
+            Span("⬡", cls="text-2xl mr-2"),
+            Span("Dashboard", cls="text-lg font-medium text-primary"),
+            cls="flex items-center"
+        ),
+        Div(
+            Div(
+                Span("👤", cls="mr-2 text-sm"),
+                Span(auth, cls="text-primary text-sm"),
+                cls="flex items-center px-4 py-2 rounded-lg",
+                style="background-color: #232323; border: 1px solid #3a3a3a;"
+            ),
+            A(
+                'Sign out',
+                href=logout,
+                cls="px-4 py-2 rounded-lg text-sm text-secondary hover:text-primary transition-all duration-200 hover:bg-[#2a2a2a]",
+                style="border: 1px solid #3a3a3a;"
+            ),
+            cls="flex items-center gap-3"
+        ),
+        cls="flex justify-between items-center mb-10 pb-6",
+        style="border-bottom: 1px solid #3a3a3a;"
+    )
+
+    # Project cards in grid
+    project_cards = [
         Div(
             A(
-                name,
-                href=route_fn,
-                hx_get=route_fn,
+                Div(
+                    Span(p['icon'], cls="text-3xl mb-3 block"),
+                    H3(p['name'], cls="text-lg font-medium text-primary mb-2"),
+                    P(p['description'], cls="text-sm text-secondary leading-relaxed"),
+                    cls="p-6"
+                ),
+                href=p['route'],
+                hx_get=p['route'],
                 hx_target='#content',
                 hx_swap='innerHTML',
-                cls="text-base font-medium text-primary hover:text-white"
+                cls="block h-full"
             ),
-            cls="p-4 border border-dark-border rounded hover:bg-dark-hover transition-all duration-150 cursor-pointer"
+            cls="rounded-xl transition-all duration-200 hover:scale-[1.02] cursor-pointer",
+            style="background-color: #232323; border: 1px solid #3a3a3a;"
         )
-        for name, route_fn in projects
+        for p in projects
     ]
 
-    content = Div(
-        H1(title, cls="text-3xl font-semibold mb-2 text-primary"),
-        P('Select a project to view:', cls="text-secondary mb-8 text-sm"),
-        Div(*project_links, cls="flex flex-col gap-2 mb-8"),
-        Div(id='content', cls="min-h-[200px] p-6 border border-dark-border rounded bg-dark-elevated"),
-        P(
-            A('Logout', href=logout, cls="text-secondary hover:text-primary"),
-            cls="mt-8 text-right"
+    # Welcome message for empty content area
+    empty_state = Div(
+        Div(
+            Span("👆", cls="text-4xl mb-4 block"),
+            P("Select a project above to get started", cls="text-secondary"),
+            cls="text-center py-8"
         ),
-        cls="max-w-3xl mx-auto px-6 py-12"
+        id='content',
+        cls="rounded-xl mt-8",
+        style="background-color: #232323; border: 1px solid #3a3a3a;"
     )
 
-    return Titled("Home", content)
-
-# Project 1 route
-@rt
-def project1(auth):
-    return Titled(
-        "Project 1",
-        Div(
-            H1("Project 1", cls="text-3xl font-semibold mb-3 text-primary"),
-            P(f"Welcome to Project 1, {auth}!", cls="text-base text-primary mb-2"),
-            P("This is a protected project route.", cls="text-sm text-secondary mb-8"),
-            A(
-                "Back to Home",
-                href=index,
-                cls="inline-block bg-white text-black px-4 py-2 rounded hover:bg-gray-100 transition-colors text-sm font-medium"
-            ),
-            cls="max-w-3xl mx-auto px-6 py-12"
-        )
+    content = Div(
+        header,
+        H2("Projects", cls="text-2xl font-semibold mb-6 text-primary"),
+        Div(*project_cards, cls="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"),
+        empty_state,
+        cls="max-w-5xl mx-auto px-6 py-8"
     )
 
-# Project 2 route
-@rt
-def project2(auth):
-    return Titled(
-        "Project 2",
-        Div(
-            H1("Project 2", cls="text-3xl font-semibold mb-3 text-primary"),
-            P(f"Welcome to Project 2, {auth}!", cls="text-base text-primary mb-2"),
-            P("This is another protected project route.", cls="text-sm text-secondary mb-8"),
-            A(
-                "Back to Home",
-                href=index,
-                cls="inline-block bg-white text-black px-4 py-2 rounded hover:bg-gray-100 transition-colors text-sm font-medium"
-            ),
-            cls="max-w-3xl mx-auto px-6 py-12"
-        )
+    # Return Title (browser tab) + centered content wrapper
+    return (
+        Title("Dashboard"),
+        Div(content, cls="min-h-screen")
     )
 
 # Run the app with FastHTML's recommended approach
