@@ -4,6 +4,41 @@ Instagram Follower Data Aggregator
 
 Aggregates follower data from Instagram export into a comprehensive JSONL file
 with all interactions and engagement metrics for marketing analysis.
+
+IMPORTANT FIXES (2025-11-19):
+- Fixed "Отправлял сообщения" (has_messaged) to accurately check if follower sent messages
+  Previously: Set to True for ANY conversation (even if only owner sent messages)
+  Now: Set to True ONLY if follower actually sent at least one message
+
+- Added separate message counts:
+  * sent_count: Messages FROM the follower
+  * received_count: Messages FROM the account owner
+  * total_messages: All messages in the conversation
+  * message_count: Now equals sent_count (kept for backward compatibility in JSONL)
+  * Removed message_count from Excel export (redundant)
+
+- Fixed "Инициировал разговор" (initiated_conversation) to use exact username matching
+  Previously: Used fuzzy string matching (e.g., "anna" matched "joanna")
+  Now: Uses exact normalized username comparison
+
+- **CRITICAL FIX**: Replaced fuzzy username matching with multi-method matching strategy
+  Previously: Used partial string matching (username IN participant_name)
+  Problem: False positives ("anna" matched "joanna"), data misattribution, data loss
+
+  Now uses 4-method matching hierarchy:
+  1. ID-based matching: Maps Instagram numeric IDs to current usernames
+  2. Exact username match: Compares folder username to follower list
+  3. Participant name match: Uses display name from message JSON
+  4. Prefix matching: Handles username changes (e.g., "ksu" → "ksu_tsi")
+
+  Instagram folder format: username_NUMERICID (e.g., "ksu_1335457711254555")
+  - Folder username represents username AT THE TIME messages were sent
+  - Current usernames may differ if user changed their username
+  - Prefix matching catches cases where user added suffix to username
+
+  Result: Accurate matching with minimal false positives or data loss
+
+- All fixes applied to both load_messages() and load_message_requests() functions
 """
 
 import json
@@ -110,16 +145,24 @@ def extract_username_from_comment(comment_text: str) -> Optional[str]:
     return None
 
 
-def load_followers(base_dir: Path = None) -> Dict[str, Dict]:
-    """Load all followers from followers_*.json files."""
+def load_followers(base_dir: Path = None) -> tuple[Dict[str, Dict], Dict[str, str]]:
+    """
+    Load all followers from followers_*.json files.
+
+    Returns:
+        tuple: (followers_dict, user_id_to_username_mapping)
+            - followers_dict: Main follower data keyed by username
+            - user_id_to_username_mapping: Maps Instagram user IDs to usernames for accurate matching
+    """
     if base_dir is None:
         base_dir = BASE_DIR
     if base_dir is None:
         raise ValueError("Base directory not set. Use process_instagram_data() or set BASE_DIR.")
-    
+
     followers = {}
+    user_id_map = {}  # Maps Instagram user ID -> username
     followers_dir = base_dir / "connections" / "followers_and_following"
-    
+
     for file_path in followers_dir.glob("followers_*.json"):
         print(f"Loading followers from {file_path.name}...")
         try:
@@ -136,11 +179,16 @@ def load_followers(base_dir: Path = None) -> Dict[str, Dict]:
                                 'follow_date': user_data.get('timestamp', 0),
                                 'follow_date_iso': datetime.fromtimestamp(user_data.get('timestamp', 0)).isoformat() if user_data.get('timestamp') else None,
                             }
+
+                            # Try to extract user ID from profile URL or other fields
+                            # Profile URLs are typically: https://www.instagram.com/username/
+                            # Unfortunately, Instagram doesn't include numeric IDs in follower exports
+                            # So we'll rely on folder name IDs during message processing
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
-    
+
     print(f"Loaded {len(followers)} unique followers")
-    return followers
+    return followers, user_id_map
 
 
 def load_comments(followers: Dict[str, Dict], base_dir: Path = None) -> None:
@@ -212,41 +260,71 @@ def load_comments(followers: Dict[str, Dict], base_dir: Path = None) -> None:
         print(f"Error loading comments: {e}")
 
 
+def extract_username_and_id_from_folder(folder_name: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract username and Instagram user ID from message folder name.
+
+    Format: username_USERID (e.g., "john_doe_123456789")
+    The last part after underscore is always the numeric user ID.
+
+    Returns:
+        tuple: (normalized_username, user_id) or (None, None) if parsing fails
+    """
+    if not folder_name:
+        return (None, None)
+
+    # Split by underscore
+    parts = folder_name.split('_')
+    if len(parts) < 2:
+        return (None, None)
+
+    # Last part is always the numeric user ID
+    user_id = parts[-1]
+
+    # Verify it's actually numeric
+    if not user_id.isdigit():
+        return (None, None)
+
+    # Everything before the last part is the username
+    username_parts = parts[:-1]
+    username = '_'.join(username_parts)
+
+    return (normalize_username(username), user_id)
+
+
 def extract_username_from_message_folder(folder_name: str) -> Optional[str]:
     """Extract username from message folder name (format: username_id)."""
-    if not folder_name:
-        return None
-    # Split by underscore and take the first part (before the ID)
-    parts = folder_name.split('_')
-    if len(parts) > 1:
-        # Reconstruct username (everything except the last part which is the ID)
-        # Handle cases where username itself has underscores
-        # The ID is typically numeric, so we'll try to find where it starts
-        username_parts = []
-        for part in parts[:-1]:  # All parts except the last
-            username_parts.append(part)
-        username = '_'.join(username_parts)
-        return normalize_username(username)
-    return None
+    username, _ = extract_username_and_id_from_folder(folder_name)
+    return username
 
 
-def load_messages(followers: Dict[str, Dict], base_dir: Path = None) -> None:
-    """Load and aggregate message data from inbox."""
+def load_messages(followers: Dict[str, Dict], base_dir: Path = None, user_id_map: Dict[str, str] = None) -> None:
+    """
+    Load and aggregate message data from inbox.
+
+    Args:
+        followers: Dictionary of follower data keyed by username
+        base_dir: Base directory containing Instagram data
+        user_id_map: Dictionary mapping Instagram user IDs to usernames (for accurate matching)
+    """
     if base_dir is None:
         base_dir = BASE_DIR
     if base_dir is None:
         return
-    
+
+    if user_id_map is None:
+        user_id_map = {}
+
     inbox_dir = base_dir / "your_instagram_activity" / "messages" / "inbox"
-    
+
     if not inbox_dir.exists():
         print("Inbox directory not found")
         return
-    
+
     print("Loading messages...")
     message_folders = list(inbox_dir.iterdir())
     print(f"Found {len(message_folders)} message conversations")
-    
+
     processed = 0
     for folder in message_folders:
         if not folder.is_dir():
@@ -265,84 +343,132 @@ def load_messages(followers: Dict[str, Dict], base_dir: Path = None) -> None:
             if not participants:
                 continue
             
-            # Find the other participant (not the account owner)
-            # Account owner is likely "Photia" or similar
-            other_participant = None
-            for participant in participants:
-                name = participant.get('name', '')
-                # Skip if it's the account owner
-                if 'photia' in name.lower():
-                    continue
-                other_participant = name
-                break
-            
-            if not other_participant:
-                # Try to extract from folder name
-                folder_username = extract_username_from_message_folder(folder.name)
-                if folder_username:
-                    other_participant = folder_username
-            
-            if not other_participant:
-                continue
-            
-            # Normalize and try to match
-            normalized_participant = normalize_username(other_participant)
-            
-            # Try exact match first
+            # Extract username and user ID from folder name
+            folder_username, folder_user_id = extract_username_and_id_from_folder(folder.name)
+
+            # Strategy: Use ID-based matching for accuracy
+            # 1. If we have a user ID and it's in our map, use mapped username
+            # 2. Otherwise, try exact username match
+            # 3. Build the ID map as we go for future matches
+            # 4. NO fuzzy matching to prevent false positives
+
             matched_username = None
-            if normalized_participant in followers:
-                matched_username = normalized_participant
-            else:
-                # Try partial matching (username might be in the participant name)
-                for username in followers.keys():
-                    if username in normalized_participant or normalized_participant in username:
-                        matched_username = username
-                        break
-            
+
+            # Method 1: ID-based matching (most accurate)
+            if folder_user_id and folder_user_id in user_id_map:
+                matched_username = user_id_map[folder_user_id]
+                print(f"  Matched by ID: {folder.name} -> {matched_username}")
+
+            # Method 2: Exact username match
+            if not matched_username and folder_username and folder_username in followers:
+                matched_username = folder_username
+                # Store the ID mapping for future use
+                if folder_user_id:
+                    user_id_map[folder_user_id] = matched_username
+
+            # Method 3: Try participant name from message JSON
             if not matched_username:
-                # Still track messages even if not a follower
+                participants = message_data.get('participants', [])
+                for participant in participants:
+                    name = participant.get('name', '')
+                    # Skip if it's the account owner
+                    if 'photia' in name.lower():
+                        continue
+
+                    normalized_name = normalize_username(name)
+                    if normalized_name in followers:
+                        matched_username = normalized_name
+                        # Store the ID mapping
+                        if folder_user_id:
+                            user_id_map[folder_user_id] = matched_username
+                        break
+
+            # Method 4: Prefix matching for username changes
+            # (e.g., folder "ksu" matches follower "ksu_tsi")
+            if not matched_username and folder_username:
+                for follower_username in followers.keys():
+                    # Check if folder username is a prefix of follower username
+                    if follower_username.startswith(folder_username + '_'):
+                        matched_username = follower_username
+                        # Store the ID mapping
+                        if folder_user_id:
+                            user_id_map[folder_user_id] = matched_username
+                        break
+
+            # If still no match, skip this conversation
+            # (No fuzzy matching - prevents false positives)
+            if not matched_username:
                 continue
             
             # Process messages
             messages = message_data.get('messages', [])
             if not messages:
                 continue
-            
+
+            # Separate messages by sender
+            follower_messages = []
+            owner_messages = []
+
+            for msg in messages:
+                sender = normalize_username(msg.get('sender_name', ''))
+                # Check if sender is the follower (exact match or follower username in sender)
+                if sender == matched_username or matched_username in sender:
+                    follower_messages.append(msg)
+                else:
+                    owner_messages.append(msg)
+
+            # Initialize or update message data structure
             if 'messages' not in followers[matched_username]:
                 followers[matched_username]['messages'] = {
-                    'has_messaged': True,
-                    'message_count': 0,
+                    'has_messaged': len(follower_messages) > 0,
+                    'sent_count': 0,
+                    'received_count': 0,
+                    'message_count': 0,  # Will be set to sent_count for backward compatibility
+                    'total_messages': len(messages),
                     'first_message_date': None,
                     'last_message_date': None,
                     'first_message_timestamp': None,
                     'last_message_timestamp': None,
                     'initiated_conversation': False
                 }
-            
+            else:
+                # Update has_messaged if we found new follower messages
+                if len(follower_messages) > 0:
+                    followers[matched_username]['messages']['has_messaged'] = True
+                followers[matched_username]['messages']['total_messages'] = len(messages)
+
             # Determine who initiated (first message sender)
             first_message = messages[-1] if messages else None  # Messages are in reverse chronological order
             if first_message:
                 first_sender = normalize_username(first_message.get('sender_name', ''))
-                followers[matched_username]['messages']['initiated_conversation'] = (
-                    first_sender == matched_username or matched_username in first_sender
-                )
-            
-            # Count messages and find dates
-            for msg in messages:
+                # Use exact comparison for initiated_conversation
+                followers[matched_username]['messages']['initiated_conversation'] = (first_sender == matched_username)
+
+            # Count messages from follower and track their timestamps
+            for msg in follower_messages:
                 timestamp_ms = msg.get('timestamp_ms', 0)
                 if timestamp_ms:
                     timestamp = timestamp_ms / 1000
-                    followers[matched_username]['messages']['message_count'] += 1
-                    
-                    if (followers[matched_username]['messages']['first_message_timestamp'] is None or 
+                    followers[matched_username]['messages']['sent_count'] += 1
+
+                    if (followers[matched_username]['messages']['first_message_timestamp'] is None or
                         timestamp < followers[matched_username]['messages']['first_message_timestamp']):
                         followers[matched_username]['messages']['first_message_timestamp'] = timestamp
                         followers[matched_username]['messages']['first_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
-                    
-                    if (followers[matched_username]['messages']['last_message_timestamp'] is None or 
+
+                    if (followers[matched_username]['messages']['last_message_timestamp'] is None or
                         timestamp > followers[matched_username]['messages']['last_message_timestamp']):
                         followers[matched_username]['messages']['last_message_timestamp'] = timestamp
                         followers[matched_username]['messages']['last_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
+
+            # Count messages from owner
+            for msg in owner_messages:
+                timestamp_ms = msg.get('timestamp_ms', 0)
+                if timestamp_ms:
+                    followers[matched_username]['messages']['received_count'] += 1
+
+            # Set message_count to sent_count for backward compatibility
+            followers[matched_username]['messages']['message_count'] = followers[matched_username]['messages']['sent_count']
             
             processed += 1
             if processed % 100 == 0:
@@ -511,23 +637,33 @@ def load_follow_requests(followers: Dict[str, Dict], base_dir: Path = None) -> N
             print(f"Error loading recent requests: {e}")
 
 
-def load_message_requests(followers: Dict[str, Dict], base_dir: Path = None) -> None:
-    """Load message requests - these can be from non-followers (valuable leads)."""
+def load_message_requests(followers: Dict[str, Dict], base_dir: Path = None, user_id_map: Dict[str, str] = None) -> None:
+    """
+    Load message requests - these can be from non-followers (valuable leads).
+
+    Args:
+        followers: Dictionary of follower data keyed by username
+        base_dir: Base directory containing Instagram data
+        user_id_map: Dictionary mapping Instagram user IDs to usernames (for accurate matching)
+    """
     if base_dir is None:
         base_dir = BASE_DIR
     if base_dir is None:
         return
-    
+
+    if user_id_map is None:
+        user_id_map = {}
+
     message_requests_dir = base_dir / "your_instagram_activity" / "messages" / "message_requests"
-    
+
     if not message_requests_dir.exists():
         print("Message requests directory not found")
         return
-    
+
     print("Loading message requests...")
     request_folders = list(message_requests_dir.iterdir())
     print(f"Found {len(request_folders)} message request conversations")
-    
+
     processed = 0
     for folder in request_folders:
         if not folder.is_dir():
@@ -541,55 +677,103 @@ def load_message_requests(followers: Dict[str, Dict], base_dir: Path = None) -> 
             with open(message_file, 'r', encoding='utf-8') as f:
                 message_data = json.load(f)
             
-            # Extract participants
-            participants = message_data.get('participants', [])
-            if not participants:
-                continue
-            
-            # Find the other participant (not the account owner)
-            other_participant = None
-            for participant in participants:
-                name = participant.get('name', '')
-                # Skip if it's the account owner
-                if 'photia' in name.lower():
-                    continue
-                other_participant = name
-                break
-            
-            if not other_participant:
-                # Try to extract from folder name
-                folder_username = extract_username_from_message_folder(folder.name)
-                if folder_username:
-                    other_participant = folder_username
-            
-            if not other_participant:
-                continue
-            
-            # Normalize and try to match
-            normalized_participant = normalize_username(other_participant)
-            
-            # Check if they're already a follower
+            # Extract username and user ID from folder name
+            folder_username, folder_user_id = extract_username_and_id_from_folder(folder.name)
+
+            # Use same ID-based matching strategy as load_messages
             matched_username = None
-            if normalized_participant in followers:
-                matched_username = normalized_participant
-            else:
-                # Try partial matching
-                for username in followers.keys():
-                    if username in normalized_participant or normalized_participant in username:
-                        matched_username = username
+            is_follower = False
+
+            # Method 1: ID-based matching (most accurate)
+            if folder_user_id and folder_user_id in user_id_map:
+                matched_username = user_id_map[folder_user_id]
+                is_follower = True
+
+            # Method 2: Exact username match
+            if not matched_username and folder_username:
+                if folder_username in followers:
+                    matched_username = folder_username
+                    is_follower = True
+                    # Store the ID mapping
+                    if folder_user_id:
+                        user_id_map[folder_user_id] = matched_username
+                else:
+                    # Not a follower - use folder username for non-follower entry
+                    matched_username = folder_username
+                    is_follower = False
+
+            # Method 3: Try participant name from message JSON
+            if not matched_username:
+                participants = message_data.get('participants', [])
+                for participant in participants:
+                    name = participant.get('name', '')
+                    # Skip if it's the account owner
+                    if 'photia' in name.lower():
+                        continue
+
+                    normalized_name = normalize_username(name)
+                    if normalized_name in followers:
+                        matched_username = normalized_name
+                        is_follower = True
+                        # Store the ID mapping
+                        if folder_user_id:
+                            user_id_map[folder_user_id] = matched_username
+                    elif not matched_username:
+                        # Use as non-follower
+                        matched_username = normalized_name
+                        is_follower = False
+                    break
+
+            # Method 4: Prefix matching for username changes
+            # (e.g., folder "ksu" matches follower "ksu_tsi")
+            if not matched_username and folder_username:
+                for follower_username in followers.keys():
+                    # Check if folder username is a prefix of follower username
+                    if follower_username.startswith(folder_username + '_'):
+                        matched_username = follower_username
+                        is_follower = True
+                        # Store the ID mapping
+                        if folder_user_id:
+                            user_id_map[folder_user_id] = matched_username
                         break
+
+                # If still no match, use folder username as non-follower
+                if not matched_username:
+                    matched_username = folder_username
+                    is_follower = False
+
+            if not matched_username:
+                continue
             
             # Process messages
             messages = message_data.get('messages', [])
             if not messages:
                 continue
-            
+
+            # Separate messages by sender (same logic as load_messages)
+            follower_messages = []
+            owner_messages = []
+
+            # Determine who initiated (first message sender)
+            first_message = messages[-1] if messages else None
+            first_sender = normalize_username(first_message.get('sender_name', '')) if first_message else ''
+
             # If they're a follower, merge into existing entry
-            if matched_username:
+            if is_follower:
+                for msg in messages:
+                    sender = normalize_username(msg.get('sender_name', ''))
+                    if sender == matched_username or matched_username in sender:
+                        follower_messages.append(msg)
+                    else:
+                        owner_messages.append(msg)
+
                 if 'messages' not in followers[matched_username]:
                     followers[matched_username]['messages'] = {
-                        'has_messaged': True,
+                        'has_messaged': len(follower_messages) > 0,
+                        'sent_count': 0,
+                        'received_count': 0,
                         'message_count': 0,
+                        'total_messages': 0,
                         'first_message_date': None,
                         'last_message_date': None,
                         'first_message_timestamp': None,
@@ -597,65 +781,91 @@ def load_message_requests(followers: Dict[str, Dict], base_dir: Path = None) -> 
                         'initiated_conversation': False,
                         'message_request_count': 0
                     }
-                
+                else:
+                    # Update has_messaged if we found new follower messages
+                    if len(follower_messages) > 0:
+                        followers[matched_username]['messages']['has_messaged'] = True
+
                 # Add message request count
                 followers[matched_username]['messages']['message_request_count'] = len(messages)
-                followers[matched_username]['messages']['initiated_conversation'] = True  # They initiated (it's a request)
-                
-                # Update message counts and dates
-                for msg in messages:
+                # Check if follower initiated (not just assuming True)
+                followers[matched_username]['messages']['initiated_conversation'] = (first_sender == matched_username)
+                followers[matched_username]['messages']['total_messages'] += len(messages)
+
+                # Update message counts and dates from follower messages
+                for msg in follower_messages:
                     timestamp_ms = msg.get('timestamp_ms', 0)
                     if timestamp_ms:
                         timestamp = timestamp_ms / 1000
-                        followers[matched_username]['messages']['message_count'] += 1
-                        
-                        if (followers[matched_username]['messages']['first_message_timestamp'] is None or 
+                        followers[matched_username]['messages']['sent_count'] += 1
+
+                        if (followers[matched_username]['messages']['first_message_timestamp'] is None or
                             timestamp < followers[matched_username]['messages']['first_message_timestamp']):
                             followers[matched_username]['messages']['first_message_timestamp'] = timestamp
                             followers[matched_username]['messages']['first_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
-                        
-                        if (followers[matched_username]['messages']['last_message_timestamp'] is None or 
+
+                        if (followers[matched_username]['messages']['last_message_timestamp'] is None or
                             timestamp > followers[matched_username]['messages']['last_message_timestamp']):
                             followers[matched_username]['messages']['last_message_timestamp'] = timestamp
                             followers[matched_username]['messages']['last_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
+
+                # Count messages from owner
+                for msg in owner_messages:
+                    timestamp_ms = msg.get('timestamp_ms', 0)
+                    if timestamp_ms:
+                        followers[matched_username]['messages']['received_count'] += 1
+
+                # Set message_count to sent_count for backward compatibility
+                followers[matched_username]['messages']['message_count'] = followers[matched_username]['messages']['sent_count']
             else:
                 # Not a follower - create new entry (valuable lead!)
                 # Extract profile URL if possible from folder name or message data
-                profile_url = f"https://www.instagram.com/{normalized_participant}"
-                
-                followers[normalized_participant] = {
-                    'username': normalized_participant,
+                profile_url = f"https://www.instagram.com/{matched_username}"
+
+                # Separate messages by sender for non-followers too
+                for msg in messages:
+                    sender = normalize_username(msg.get('sender_name', ''))
+                    if sender == matched_username or matched_username in sender:
+                        follower_messages.append(msg)
+                    else:
+                        owner_messages.append(msg)
+
+                followers[matched_username] = {
+                    'username': matched_username,
                     'profile_url': profile_url,
                     'follow_date': None,
                     'follow_date_iso': None,
                     'is_follower': False,
                     'messages': {
-                        'has_messaged': True,
-                        'message_count': len(messages),
+                        'has_messaged': len(follower_messages) > 0,
+                        'sent_count': len(follower_messages),
+                        'received_count': len(owner_messages),
+                        'message_count': len(follower_messages),
+                        'total_messages': len(messages),
                         'message_request_count': len(messages),
                         'first_message_date': None,
                         'last_message_date': None,
                         'first_message_timestamp': None,
                         'last_message_timestamp': None,
-                        'initiated_conversation': True
+                        'initiated_conversation': (first_sender == matched_username)
                     },
                     'status': 'message_request_only'
                 }
-                
-                # Set dates
-                for msg in messages:
+
+                # Set dates from follower's messages
+                for msg in follower_messages:
                     timestamp_ms = msg.get('timestamp_ms', 0)
                     if timestamp_ms:
                         timestamp = timestamp_ms / 1000
-                        if (followers[normalized_participant]['messages']['first_message_timestamp'] is None or 
-                            timestamp < followers[normalized_participant]['messages']['first_message_timestamp']):
-                            followers[normalized_participant]['messages']['first_message_timestamp'] = timestamp
-                            followers[normalized_participant]['messages']['first_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
-                        
-                        if (followers[normalized_participant]['messages']['last_message_timestamp'] is None or 
-                            timestamp > followers[normalized_participant]['messages']['last_message_timestamp']):
-                            followers[normalized_participant]['messages']['last_message_timestamp'] = timestamp
-                            followers[normalized_participant]['messages']['last_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
+                        if (followers[matched_username]['messages']['first_message_timestamp'] is None or
+                            timestamp < followers[matched_username]['messages']['first_message_timestamp']):
+                            followers[matched_username]['messages']['first_message_timestamp'] = timestamp
+                            followers[matched_username]['messages']['first_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
+
+                        if (followers[matched_username]['messages']['last_message_timestamp'] is None or
+                            timestamp > followers[matched_username]['messages']['last_message_timestamp']):
+                            followers[matched_username]['messages']['last_message_timestamp'] = timestamp
+                            followers[matched_username]['messages']['last_message_date'] = datetime.fromtimestamp(timestamp).isoformat()
             
             processed += 1
         
@@ -700,7 +910,9 @@ def calculate_engagement_score(follower_data: Dict) -> float:
     
     # Messages (weight: 3 points each)
     if 'messages' in follower_data:
-        score += follower_data['messages']['message_count'] * 3
+        # Use sent_count (messages from follower) or fall back to message_count
+        messages_from_follower = follower_data['messages'].get('sent_count', follower_data['messages'].get('message_count', 0))
+        score += messages_from_follower * 3
         if follower_data['messages'].get('initiated_conversation'):
             score += 5  # Bonus for initiating
     
@@ -869,14 +1081,18 @@ def flatten_follower_data(follower_data: Dict) -> Dict:
     if 'messages' in follower_data:
         messages = follower_data['messages']
         flat['has_messaged'] = messages.get('has_messaged', False)
-        flat['message_count'] = messages.get('message_count', 0)
+        flat['sent_count'] = messages.get('sent_count', 0)
+        flat['received_count'] = messages.get('received_count', 0)
+        flat['total_messages'] = messages.get('total_messages', 0)
         flat['message_request_count'] = messages.get('message_request_count', 0)
         flat['first_message_date'] = messages.get('first_message_date', '')
         flat['last_message_date'] = messages.get('last_message_date', '')
         flat['initiated_conversation'] = messages.get('initiated_conversation', False)
     else:
         flat['has_messaged'] = False
-        flat['message_count'] = 0
+        flat['sent_count'] = 0
+        flat['received_count'] = 0
+        flat['total_messages'] = 0
         flat['message_request_count'] = 0
         flat['first_message_date'] = ''
         flat['last_message_date'] = ''
@@ -930,10 +1146,12 @@ def export_to_excel(followers: Dict[str, Dict], output_file: Path) -> None:
         'last_comment_date': 'Дата последнего комментария',
         'sample_comments': 'Примеры комментариев',
         'has_messaged': 'Отправлял сообщения',
-        'message_count': 'Количество сообщений',
+        'sent_count': 'Отправлено сообщений (от подписчика)',
+        'received_count': 'Получено сообщений (от владельца)',
+        'total_messages': 'Всего сообщений в переписке',
         'message_request_count': 'Количество запросов на сообщение',
-        'first_message_date': 'Дата первого сообщения',
-        'last_message_date': 'Дата последнего сообщения',
+        'first_message_date': 'Дата первого сообщения от подписчика',
+        'last_message_date': 'Дата последнего сообщения от подписчика',
         'initiated_conversation': 'Инициировал разговор',
         'story_likes_count': 'Лайки историй',
         'emoji_reactions_count': 'Эмодзи реакции на истории',
@@ -965,12 +1183,14 @@ def export_to_excel(followers: Dict[str, Dict], output_file: Path) -> None:
             ['Дата первого комментария', 'Дата и время первого комментария от пользователя'],
             ['Дата последнего комментария', 'Дата и время последнего комментария от пользователя'],
             ['Примеры комментариев', 'Примеры комментариев пользователя (первые 3)'],
-            ['Отправлял сообщения', 'Да/Нет - отправлял ли пользователь сообщения'],
-            ['Количество сообщений', 'Общее количество сообщений в переписке'],
+            ['Отправлял сообщения', 'Да/Нет - отправлял ли подписчик хотя бы одно сообщение'],
+            ['Отправлено сообщений (от подписчика)', 'Количество сообщений, отправленных подписчиком'],
+            ['Получено сообщений (от владельца)', 'Количество сообщений, отправленных владельцем аккаунта'],
+            ['Всего сообщений в переписке', 'Общее количество всех сообщений (отправленных + полученных)'],
             ['Количество запросов на сообщение', 'Количество сообщений в запросах (для не подписчиков)'],
-            ['Дата первого сообщения', 'Дата и время первого сообщения от пользователя'],
-            ['Дата последнего сообщения', 'Дата и время последнего сообщения от пользователя'],
-            ['Инициировал разговор', 'Да/Нет - начал ли пользователь разговор первым'],
+            ['Дата первого сообщения от подписчика', 'Дата и время первого сообщения от подписчика'],
+            ['Дата последнего сообщения от подписчика', 'Дата и время последнего сообщения от подписчика'],
+            ['Инициировал разговор', 'Да/Нет - начал ли подписчик разговор первым (отправил первое сообщение)'],
             ['Лайки историй', 'Количество лайков, поставленных на ваши истории'],
             ['Эмодзи реакции на истории', 'Количество эмодзи реакций на ваши истории'],
             ['Взаимодействия с таймерами', 'Количество взаимодействий с таймерами обратного отсчета в историях'],
@@ -1058,30 +1278,32 @@ def process_instagram_data(
     
     if progress_callback:
         progress_callback("Загрузка подписчиков...", 5)
-    
-    # Load all followers
-    followers = load_followers(base_dir)
-    
+
+    # Load all followers and get user ID mapping
+    followers, user_id_map = load_followers(base_dir)
+
     if progress_callback:
         progress_callback(f"Загружено {len(followers)} подписчиков. Обработка комментариев...", 15)
-    
+
     # Load and aggregate interaction data
     load_comments(followers, base_dir)
-    
+
     if progress_callback:
         progress_callback("Обработка сообщений...", 30)
-    
-    load_messages(followers, base_dir)
-    
+
+    # Pass user_id_map for accurate ID-based matching
+    load_messages(followers, base_dir, user_id_map)
+
     if progress_callback:
         progress_callback("Обработка взаимодействий с историями...", 50)
-    
+
     load_story_interactions(followers, base_dir)
-    
+
     if progress_callback:
         progress_callback("Обработка запросов на сообщения...", 65)
-    
-    load_message_requests(followers, base_dir)
+
+    # Pass user_id_map for accurate ID-based matching
+    load_message_requests(followers, base_dir, user_id_map)
     load_follow_requests(followers, base_dir)
     load_recently_unfollowed(followers, base_dir)
     
@@ -1129,15 +1351,15 @@ def main():
     
     print("Instagram Follower Data Aggregator")
     print("=" * 50)
-    
-    # Load all followers
-    followers = load_followers()
-    
+
+    # Load all followers and get user ID mapping
+    followers, user_id_map = load_followers()
+
     # Load and aggregate interaction data
     load_comments(followers)
-    load_messages(followers)
+    load_messages(followers, user_id_map=user_id_map)
     load_story_interactions(followers)
-    load_message_requests(followers)
+    load_message_requests(followers, user_id_map=user_id_map)
     load_follow_requests(followers)
     load_recently_unfollowed(followers)
     

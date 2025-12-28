@@ -43,3 +43,7 @@ build/
 
 # Temporary files for Instagram aggregator
 temp/
+
+# Instagram aggregator output files
+projects/instagram_aggregator/*.jsonl
+projects/instagram_aggregator/*.xlsx
