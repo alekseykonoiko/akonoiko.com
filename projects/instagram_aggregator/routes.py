@@ -195,7 +195,10 @@ def setup_routes(rt):
             cls="max-w-3xl mx-auto px-6 py-12"
         )
         
-        return Titled("Instagram Aggregator", content)
+        return (
+            Title("Instagram Aggregator"),
+            Div(content, cls="min-h-screen")
+        )
 
     # Upload handler
     @rt('/upload_instagram_data')

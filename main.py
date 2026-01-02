@@ -7,8 +7,9 @@ import sys
 # Add projects directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Import Instagram aggregator routes
+# Import project routes
 from projects.instagram_aggregator import setup_routes as setup_instagram
+from projects.webp_converter import setup_routes as setup_webp
 
 # Simple in-memory user store (replace with database in production)
 users = {
@@ -32,7 +33,10 @@ beforeware = Beforeware(
         r'.*\.js',
         '/login',
         '/send_login',
-        '/progress_stream'  # SSE endpoint needs session but not auth redirect
+        '/progress_stream',  # SSE endpoint needs session but not auth redirect
+        '/webp_progress_stream',  # WebP converter SSE endpoint
+        '/webp_thumbnail',  # Thumbnail images (session UUID provides security)
+        '/webp_fullsize',  # Full-size images for crop editor
     ]
 )
 
@@ -49,6 +53,10 @@ tailwind_script = Script(
 
 # HTMX SSE extension for progress updates
 sse_script = Script(src="https://unpkg.com/htmx-ext-sse@2.2.3/sse.js")
+
+# Cropper.js for image cropping (v1.6.2 - stable, well-documented)
+cropper_css = Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css")
+cropper_js = Script(src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js")
 
 # Minimal Tailwind config - just for background color utilities
 # (Text colors are in style.css instead for cleaner code)
@@ -79,7 +87,7 @@ app, rt = fast_app(
     secret_key=secret_key,
     pico=False,  # Disable Pico CSS
     live=enable_live_reload,  # Enable live reload only if ENABLE_LIVE_RELOAD=true in .env
-    hdrs=(global_css, tailwind_script, tailwind_config, sse_script)  # Add global CSS, Tailwind, and SSE
+    hdrs=(global_css, tailwind_script, tailwind_config, sse_script, cropper_css, cropper_js)  # Add global CSS, Tailwind, SSE, and Cropper.js
 )
 
 # Mount static files directory for serving icons, CSS, JS, etc.
@@ -192,8 +200,9 @@ def logout(sess):
         del sess['auth']
     return RedirectResponse('/login', status_code=303)
 
-# Setup Instagram aggregator routes
+# Setup project routes
 instagram_routes = setup_instagram(rt)
+webp_routes = setup_webp(rt)
 
 # Home page with project links
 @rt
@@ -205,6 +214,13 @@ def index(auth):
             'description': 'Aggregate and analyze Instagram follower data for marketing insights',
             'route': instagram_routes['instagram_aggregator'],
             'icon': '📊',
+            'status': 'active'
+        },
+        {
+            'name': 'WebP Converter',
+            'description': 'Convert images to optimized WebP format for web and mobile',
+            'route': webp_routes['webp_converter'],
+            'icon': '🖼️',
             'status': 'active'
         },
     ]
