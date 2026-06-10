@@ -25,3 +25,46 @@ akonoiko.com {
 #     redir https://akonoiko.com{uri} permanent
 # }
 
+# Photia Web - React SPA with custom login page
+photia.akonoiko.com {
+    # Required headers for SharedArrayBuffer (multi-threaded WASM)
+    header {
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Embedder-Policy "require-corp"
+    }
+
+    # API proxy to backend (preserves /api prefix)
+    handle /api/* {
+        reverse_proxy https://photoapp.neuralphotos.ai:19731 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    # Serve static files from the React build
+    handle {
+        root * /var/www/photia
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# CommandCenter - internal operations dashboard for Appmonster projects
+ops.appmonster.tech {
+    encode gzip zstd
+
+    reverse_proxy 127.0.0.1:5010 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        X-Robots-Tag "noindex, nofollow"
+    }
+}

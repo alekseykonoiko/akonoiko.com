@@ -303,4 +303,4 @@ def index(auth):
 # live=True in fast_app() enables auto browser refresh + serve() reload=True (default) handles server restart
 # Note: In Docker, file watchers may be unreliable. Use ./reload.sh if changes aren't detected
 # Watch projects directory for live reload
-serve(reload_includes=['projects/**/*.py'])
+serve(host='127.0.0.1', reload_includes=['projects/**/*.py'])
